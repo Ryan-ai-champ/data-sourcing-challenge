@@ -104,7 +104,8 @@ def process_cme_data(cme_data):
             processed_data.append(cme_info)
         
         df = pd.DataFrame(processed_data)
-        df['time'] = pd.to_datetime(df['time'])
+        df['cmeTime'] = pd.to_datetime(df['time'])
+        df = df[['cmeID', 'cmeTime']]  # Keep only required fields
         
         logging.info(f"Processed {len(processed_data)} CME records")
         return df
@@ -225,7 +226,15 @@ def process_gst_data(gst_data, cme_df):
         # Create final DataFrame
         df = pd.DataFrame(processed_data)
         if not df.empty:
-            df['time'] = pd.to_datetime(df['time'])
+            # Ensure all datetime fields are properly formatted
+            df['gstTime'] = pd.to_datetime(df['gstTime'])
+            df['cmeTime'] = pd.to_datetime(df['cmeTime'])
+            
+            # Calculate time difference in hours
+            df['timeDifferenceHours'] = (df['gstTime'] - df['cmeTime']).dt.total_seconds() / 3600
+            
+            # Keep only required columns in specific order
+            df = df[['cmeID', 'cmeTime', 'gstID', 'gstTime', 'timeDifferenceHours', 'kpIndex']]
         
         logging.info(f"Processed {len(processed_data)} GST records")
         return df
