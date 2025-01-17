@@ -181,17 +181,14 @@ def process_gst_data(gst_data, cme_df):
                         logging.warning(f"Invalid linked event format: {event}")
                         continue
                         
-                    event_type = event.get('activityType')
-                    event_id = event.get('activityID')
-                    
-                    if event_type == 'CME':
-                        if event_id:
-                            cme_links.append(event_id)
-                            logging.info(f"Found valid linked CME: {event_id}")
-                        else:
-                            logging.warning("Found CME event without ID")
+                    event_id = event.get('activityID', '')
+
+                    # Check if the event is a CME based on ID pattern
+                    if event_id and '-CME-' in event_id:
+                        cme_links.append(event_id)
+                        logging.info(f"Found valid linked CME: {event_id}")
                     else:
-                        logging.debug(f"Skipping non-CME event of type: {event_type}")
+                        logging.debug(f"Skipping non-CME event with ID: {event_id}")
 
                 if not cme_links:
                     logging.info(f"Skipping GST {gst.get('gstID', 'unknown')} - no valid linked CMEs found")
