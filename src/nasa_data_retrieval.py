@@ -68,8 +68,11 @@ def get_gst_data(start_date, end_date):
         response = requests.get(url, params=params)
         response.raise_for_status()
         
-        logging.info(f"Successfully retrieved GST data from {start_date} to {end_date}")
-        return response.json()
+        data = response.json()
+        logging.info(f"Successfully retrieved {len(data)} GST records from {start_date} to {end_date}")
+        if data:
+            logging.info(f"Sample GST record structure: {data[0]}")
+        return data
         
     except requests.exceptions.RequestException as e:
         logging.error(f"Error retrieving GST data: {str(e)}")
@@ -139,6 +142,7 @@ def process_gst_data(gst_data, cme_df):
     processed_data = []
     
     try:
+        logging.info(f"Processing {len(gst_data)} raw GST records")
         for gst in gst_data:
             # Process each GST record
             try:
@@ -146,6 +150,7 @@ def process_gst_data(gst_data, cme_df):
                     raise ValueError(f"Invalid GST record: {gst}")
                         
                 linked_events = gst.get('linkedEvents')
+                logging.info(f"Found {len(linked_events) if linked_events else 0} linked events for GST: {gst.get('gstID', 'unknown')}")
                 if linked_events is None:
                     logging.debug(f"No linked events for GST: {gst.get('gstID', 'unknown')}")
                     continue
