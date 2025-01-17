@@ -80,27 +80,26 @@ def get_gst_data(start_date, end_date):
 
 def process_cme_data(cme_data):
     """
-    Process and clean CME data.
+    Process and clean CME data from NASA DONKI API.
     
     Args:
-        cme_data (list): Raw CME data from NASA API
-        
+        cme_data (list): Raw CME data from NASA API containing fields:
+            - activityID: Unique identifier for the CME
+            - startTime: Start time of the CME event
+            - link: URL to event details
+            
     Returns:
-        DataFrame: Processed CME data
+        DataFrame: Processed CME data with columns:
+            - cmeID: Unique identifier for the CME
+            - time: Start time of the CME event
     """
     try:
         # Extract relevant fields
         processed_data = []
         for cme in cme_data:
             cme_info = {
-                'time': cme.get('startTime'),
-                'speed': cme.get('speed', 0),
-                'type': 'CME',
-                'halfAngle': cme.get('halfAngle', 0),
-                'note': cme.get('note', ''),
-                'latitude': cme.get('latitude', 0),
-                'longitude': cme.get('longitude', 0),
-                'cmeID': cme.get('activityID', '')
+                'cmeID': cme.get('activityID', ''),
+                'time': cme.get('startTime')
             }
             processed_data.append(cme_info)
         
@@ -211,12 +210,12 @@ def process_gst_data(gst_data, cme_df):
                         kp_index = kp_index_data[0].get('kpIndex', 0)
                     
                     gst_info = {
-                        'time': start_time,
-                        'type': 'GST',
-                        'kpIndex': kp_index,
+                        'cmeID': cme_id,
+                        'cmeTime': cme_time,
                         'gstID': gst.get('gstID', ''),
-                        'linkedCME': cme_id,
-                        'timeDifferenceHours': time_diff
+                        'gstTime': gst_time,
+                        'timeDifferenceHours': time_diff,
+                        'kpIndex': kp_index
                     }
                     processed_data.append(gst_info)
             except Exception as e:
@@ -237,23 +236,37 @@ def process_gst_data(gst_data, cme_df):
 
 def merge_and_clean_data(cme_df, gst_df):
     """
-    Merge and clean CME and GST data.
+    Merge and clean CME and GST data to create final dataset.
+    
+    Args:
+        cme_df (DataFrame): Processed CME data with columns:
+            - cmeID: Unique identifier for the CME
+            - time: Start time of the CME event
+        gst_df (DataFrame): Processed GST data with columns: 
+            - cmeID: ID of linked CME event
+            - cmeTime: Start time of CME event
+            - gstID: Unique identifier for the GST
+            - gstTime: Start time of GST event
+            - timeDifferenceHours: Hours between CME and GST
+            - kpIndex: Geomagnetic storm KP index
+            
+    Returns:
+        DataFrame: Merged and cleaned data containing only linked CME-GST events
     """
     try:
-        # Merge dataframes
-        merged_df = pd.concat([cme_df, gst_df], ignore_index=True)
+        # We only need the GST dataframe since it already contains linked CME info
+        if gst_df.empty:
+            logging.warning("No GST records with linked CMEs found")
+            return pd.DataFrame()
         
-        # Sort by time
-        merged_df = merged_df.sort_values('time')
-        
-        # Clean data
-        merged_df = merged_df.dropna(subset=['time'])
+        # Sort by GST time
+        cleaned_df = gst_df.sort_values('gstTime')
         
         # Reset index
-        merged_df = merged_df.reset_index(drop=True)
+        cleaned_df = cleaned_df.reset_index(drop=True)
         
-        logging.info(f"Successfully merged and cleaned data. Final dataset has {len(merged_df)} records")
-        return merged_df
+        logging.info(f"Successfully merged and cleaned data. Final dataset has {len(cleaned_df)} records")
+        return cleaned_df
         
     except Exception as e:
         logging.error(f"Error merging and cleaning data: {str(e)}")
