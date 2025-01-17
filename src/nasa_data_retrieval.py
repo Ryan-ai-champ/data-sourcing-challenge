@@ -11,7 +11,7 @@ from typing import Optional, Dict, Any
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(levelname)s: %(message)s'
 )
 
 # Load environment variables
@@ -210,7 +210,6 @@ def process_gst_data(gst_data, cme_df):
         logging.info(f"Processing {len(gst_data)} raw GST records")
         for gst in gst_data:
             # Log the complete GST record for debugging
-            logging.debug(f"Processing GST record: {gst.get('gstID', 'unknown')}")
             try:
                 if not isinstance(gst, dict):
                     raise ValueError(f"Invalid GST record: {gst}")
@@ -226,7 +225,6 @@ def process_gst_data(gst_data, cme_df):
                 else:
                     logging.info(f"No linked events found for GST: {gst.get('gstID', 'unknown')}")
                 if linked_events is None:
-                    logging.debug(f"No linked events for GST: {gst.get('gstID', 'unknown')}")
                     continue
                         
                 start_time = gst.get('startTime')
@@ -251,9 +249,6 @@ def process_gst_data(gst_data, cme_df):
                     # Check if the event is a CME based on ID pattern
                     if event_id and '-CME-' in event_id:
                         cme_links.append(event_id)
-                        logging.info(f"Found valid linked CME: {event_id}")
-                    else:
-                        logging.debug(f"Skipping non-CME event with ID: {event_id}")
 
                 if not cme_links:
                     logging.info(f"Skipping GST {gst.get('gstID', 'unknown')} - no valid linked CMEs found")
@@ -261,11 +256,8 @@ def process_gst_data(gst_data, cme_df):
                 for cme_id in cme_links:
                     linked_cme = cme_df[cme_df['cmeID'] == cme_id]
                     if linked_cme.empty:
-                        logging.warning(f"No matching CME found in database for ID: {cme_id}")
-                        logging.debug(f"Available CME IDs: {cme_df['cmeID'].unique()}")
+                        logging.warning(f"No matching CME found for ID: {cme_id}")
                         continue
-                    else:
-                        logging.info(f"Successfully matched CME {cme_id} with GST {gst.get('gstID', 'unknown')}")
                             
                     cme_time = linked_cme['time'].iloc[0]
                     time_diff = (gst_time - cme_time).total_seconds() / 3600  # hours
@@ -351,9 +343,9 @@ def main():
     Main execution function.
     """
     try:
-        # Set date range as specified in requirements
-        start_date = datetime(2013, 5, 1)
+        # Set specific date range per requirements 
         end_date = datetime(2024, 5, 1)
+        start_date = datetime(2013, 5, 1)
         
         # Get data
         cme_data = get_cme_data(start_date, end_date)
@@ -366,13 +358,38 @@ def main():
         # Merge and clean data
         final_df = merge_and_clean_data(cme_df, gst_df)
         
+        # Calculate summary statistics
+        if not final_df.empty:
+            avg_time_diff = final_df['timeDifferenceHours'].mean()
+            min_time_diff = final_df['timeDifferenceHours'].min()
+            max_time_diff = final_df['timeDifferenceHours'].max()
+            std_time_diff = final_df['timeDifferenceHours'].std()
+            
+            logging.info("\nSummary Statistics:")
+            logging.info(f"Average time between CME and GST: {avg_time_diff:.2f} hours")
+            logging.info(f"Minimum time difference: {min_time_diff:.2f} hours")
+            logging.info(f"Maximum time difference: {max_time_diff:.2f} hours")
+            logging.info(f"Standard deviation: {std_time_diff:.2f} hours")
+        
         # Create output directory if it doesn't exist
         os.makedirs('output', exist_ok=True)
         
         # Save to CSV
         output_file = 'output/space_weather_data.csv'
         final_df.to_csv(output_file, index=False)
-        logging.info(f"Data successfully saved to {output_file}")
+        logging.info(f"\nData successfully saved to {output_file}")
+        
+        # Save summary statistics to a separate file
+        if not final_df.empty:
+            stats_file = 'output/summary_statistics.txt'
+            with open(stats_file, 'w') as f:
+                f.write("Summary Statistics for CME-GST Time Differences\n")
+                f.write("===========================================\n\n")
+                f.write(f"Average time between CME and GST: {avg_time_diff:.2f} hours\n")
+                f.write(f"Minimum time difference: {min_time_diff:.2f} hours\n")
+                f.write(f"Maximum time difference: {max_time_diff:.2f} hours\n")
+                f.write(f"Standard deviation: {std_time_diff:.2f} hours\n")
+            logging.info(f"Summary statistics saved to {stats_file}")
         
         return final_df
         
