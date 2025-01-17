@@ -144,13 +144,22 @@ def process_gst_data(gst_data, cme_df):
     try:
         logging.info(f"Processing {len(gst_data)} raw GST records")
         for gst in gst_data:
-            # Process each GST record
+            # Log the complete GST record for debugging
+            logging.debug(f"Processing GST record: {gst.get('gstID', 'unknown')}")
             try:
                 if not isinstance(gst, dict):
                     raise ValueError(f"Invalid GST record: {gst}")
                         
-                linked_events = gst.get('linkedEvents')
-                logging.info(f"Found {len(linked_events) if linked_events else 0} linked events for GST: {gst.get('gstID', 'unknown')}")
+                linked_events = gst.get('linkedEvents', [])
+                if linked_events:
+                    logging.info(f"Found {len(linked_events)} linked events for GST: {gst.get('gstID', 'unknown')}")
+                    # Log details about each linked event
+                    for idx, event in enumerate(linked_events):
+                        logging.info(f"  Linked Event {idx + 1}:")
+                        logging.info(f"    Type: {event.get('activityType', 'unknown')}")
+                        logging.info(f"    ID: {event.get('activityID', 'unknown')}")
+                else:
+                    logging.info(f"No linked events found for GST: {gst.get('gstID', 'unknown')}")
                 if linked_events is None:
                     logging.debug(f"No linked events for GST: {gst.get('gstID', 'unknown')}")
                     continue
@@ -165,22 +174,36 @@ def process_gst_data(gst_data, cme_df):
                     raise ValueError(f"Invalid GST time format: {start_time}")
                         
                 # Process linked CME events
+                # Process linked CME events
                 cme_links = []
                 for event in linked_events:
-                    if isinstance(event, dict) and event.get('activityType') == 'CME':
-                        cme_id = event.get('activityID')
-                        if cme_id:
-                            cme_links.append(cme_id)
-                            logging.debug(f"Found linked CME: {cme_id}")
-                
-                if not cme_links:  # Skip GSTs without linked CMEs
-                    continue
+                    if not isinstance(event, dict):
+                        logging.warning(f"Invalid linked event format: {event}")
+                        continue
                         
+                    event_type = event.get('activityType')
+                    event_id = event.get('activityID')
+                    
+                    if event_type == 'CME':
+                        if event_id:
+                            cme_links.append(event_id)
+                            logging.info(f"Found valid linked CME: {event_id}")
+                        else:
+                            logging.warning("Found CME event without ID")
+                    else:
+                        logging.debug(f"Skipping non-CME event of type: {event_type}")
+
+                if not cme_links:
+                    logging.info(f"Skipping GST {gst.get('gstID', 'unknown')} - no valid linked CMEs found")
+                    continue
                 for cme_id in cme_links:
                     linked_cme = cme_df[cme_df['cmeID'] == cme_id]
                     if linked_cme.empty:
-                        logging.warning(f"No matching CME found for ID: {cme_id}")
+                        logging.warning(f"No matching CME found in database for ID: {cme_id}")
+                        logging.debug(f"Available CME IDs: {cme_df['cmeID'].unique()}")
                         continue
+                    else:
+                        logging.info(f"Successfully matched CME {cme_id} with GST {gst.get('gstID', 'unknown')}")
                             
                     cme_time = linked_cme['time'].iloc[0]
                     time_diff = (gst_time - cme_time).total_seconds() / 3600  # hours
