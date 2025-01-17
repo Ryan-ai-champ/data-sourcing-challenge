@@ -1,9 +1,12 @@
 import os
+import time
 import requests
 import pandas as pd
 import logging
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from requests.exceptions import RequestException
+from typing import Optional, Dict, Any
 
 # Configure logging
 logging.basicConfig(
@@ -14,6 +17,65 @@ logging.basicConfig(
 # Load environment variables
 load_dotenv()
 NASA_API_KEY = os.getenv('NASA_API_KEY')
+
+# API rate limiting constants
+MIN_REQUEST_INTERVAL = 1.0  # Minimum seconds between requests
+MAX_RETRIES = 3  # Maximum number of retry attempts
+RETRY_DELAY_BASE = 2  # Base for exponential backoff
+
+def make_nasa_request(url: str, params: Dict[str, Any], retry_count: int = 0) -> Optional[Dict]:
+    """
+    Make a request to NASA API with retry logic and rate limiting.
+    
+    Args:
+        url: The API endpoint URL
+        params: Query parameters for the request
+        retry_count: Current retry attempt number
+        
+    Returns:
+        JSON response from the API or None if all retries fail
+        
+    Raises:
+        RequestException: If the request fails after all retries
+    """
+    try:
+        # Add delay between requests
+        time.sleep(MIN_REQUEST_INTERVAL)
+        
+        response = requests.get(url, params=params)
+        
+        if response.status_code == 429:  # Rate limit exceeded
+            if retry_count >= MAX_RETRIES:
+                raise RequestException(f"Rate limit exceeded after {MAX_RETRIES} retries")
+            
+            # Calculate exponential backoff delay
+            delay = RETRY_DELAY_BASE ** retry_count
+            logging.warning(f"Rate limit hit. Waiting {delay} seconds before retry {retry_count + 1}/{MAX_RETRIES}")
+            time.sleep(delay)
+            return make_nasa_request(url, params, retry_count + 1)
+            
+        elif response.status_code == 403:  # Invalid API key
+            raise RequestException("Invalid NASA API key. Please check your .env file")
+            
+        elif response.status_code != 200:
+            if retry_count >= MAX_RETRIES:
+                raise RequestException(f"Request failed with status {response.status_code} after {MAX_RETRIES} retries")
+            
+            delay = RETRY_DELAY_BASE ** retry_count
+            logging.warning(f"Request failed. Waiting {delay} seconds before retry {retry_count + 1}/{MAX_RETRIES}")
+            time.sleep(delay)
+            return make_nasa_request(url, params, retry_count + 1)
+            
+        return response.json()
+        
+    except requests.exceptions.ConnectionError as e:
+        if retry_count >= MAX_RETRIES:
+            raise RequestException(f"Connection error after {MAX_RETRIES} retries: {str(e)}")
+        
+        delay = RETRY_DELAY_BASE ** retry_count
+        logging.warning(f"Connection error. Waiting {delay} seconds before retry {retry_count + 1}/{MAX_RETRIES}")
+        time.sleep(delay)
+        return make_nasa_request(url, params, retry_count + 1)
 
 def get_cme_data(start_date, end_date):
     """
@@ -27,19 +89,21 @@ def get_cme_data(start_date, end_date):
         list: List of CME events
     """
     try:
-        
-        url = f"https://api.nasa.gov/DONKI/CME"
+        url = "https://api.nasa.gov/DONKI/CME"
         params = {
             'startDate': start_date.strftime('%Y-%m-%d'),
             'endDate': end_date.strftime('%Y-%m-%d'),
             'api_key': NASA_API_KEY
         }
         
-        response = requests.get(url, params=params)
-        response.raise_for_status()
+        logging.info(f"Requesting CME data from {start_date} to {end_date}")
+        response_data = make_nasa_request(url, params)
         
-        logging.info(f"Successfully retrieved CME data from {start_date} to {end_date}")
-        return response.json()
+        if not response_data:
+            raise RequestException("Failed to retrieve CME data after all retries")
+            
+        logging.info(f"Successfully retrieved {len(response_data)} CME records")
+        return response_data
         
     except requests.exceptions.RequestException as e:
         logging.error(f"Error retrieving CME data: {str(e)}")
@@ -57,22 +121,23 @@ def get_gst_data(start_date, end_date):
         list: List of GST events
     """
     try:
-        
-        url = f"https://api.nasa.gov/DONKI/GST"
+        url = "https://api.nasa.gov/DONKI/GST"
         params = {
             'startDate': start_date.strftime('%Y-%m-%d'),
             'endDate': end_date.strftime('%Y-%m-%d'),
             'api_key': NASA_API_KEY
         }
         
-        response = requests.get(url, params=params)
-        response.raise_for_status()
+        logging.info(f"Requesting GST data from {start_date} to {end_date}")
+        response_data = make_nasa_request(url, params)
         
-        data = response.json()
-        logging.info(f"Successfully retrieved {len(data)} GST records from {start_date} to {end_date}")
-        if data:
-            logging.info(f"Sample GST record structure: {data[0]}")
-        return data
+        if not response_data:
+            raise RequestException("Failed to retrieve GST data after all retries")
+            
+        logging.info(f"Successfully retrieved {len(response_data)} GST records")
+        if response_data:
+            logging.debug(f"Sample GST record structure: {response_data[0]}")
+        return response_data
         
     except requests.exceptions.RequestException as e:
         logging.error(f"Error retrieving GST data: {str(e)}")
