@@ -2,29 +2,22 @@ import os
 import time
 import requests
 import pandas as pd
-import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from dotenv import load_dotenv
-from requests.exceptions import RequestException
-from typing import Optional, Dict, Any
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(levelname)s: %(message)s'
-)
 
 # Load environment variables
 load_dotenv()
 NASA_API_KEY = os.getenv('NASA_API_KEY')
 
-# API rate limiting constants
-MIN_REQUEST_INTERVAL = 1.0  # Minimum seconds between requests
-MAX_RETRIES = 3  # Maximum number of retry attempts
-RETRY_DELAY_BASE = 2  # Base for exponential backoff
-
-def make_nasa_request(url: str, params: Dict[str, Any], retry_count: int = 0) -> Optional[Dict]:
+def get_nasa_data(url, params):
     """
+    Make a request to NASA API with basic error handling.
+    """
+    time.sleep(1)  # Basic rate limiting
+    response = requests.get(url, params=params)
+    response.raise_for_status()
+    return response.json()
     Make a request to NASA API with retry logic and rate limiting.
     
     Args:
@@ -78,6 +71,14 @@ def make_nasa_request(url: str, params: Dict[str, Any], retry_count: int = 0) ->
         return make_nasa_request(url, params, retry_count + 1)
 
 def get_cme_data(start_date, end_date):
+    """Get CME data for the specified date range."""
+    url = "https://api.nasa.gov/DONKI/CME"
+    params = {
+        'startDate': start_date.strftime('%Y-%m-%d'),
+        'endDate': end_date.strftime('%Y-%m-%d'),
+        'api_key': NASA_API_KEY
+    }
+    return get_nasa_data(url, params)
     """
     Retrieve CME (Coronal Mass Ejection) data from NASA API.
     
@@ -110,6 +111,14 @@ def get_cme_data(start_date, end_date):
         raise
 
 def get_gst_data(start_date, end_date):
+    """Get GST data for the specified date range."""
+    url = "https://api.nasa.gov/DONKI/GST"
+    params = {
+        'startDate': start_date.strftime('%Y-%m-%d'),
+        'endDate': end_date.strftime('%Y-%m-%d'),
+        'api_key': NASA_API_KEY
+    }
+    return get_nasa_data(url, params)
     """
     Retrieve GST (Geomagnetic Storm) data from NASA API.
     
@@ -144,6 +153,14 @@ def get_gst_data(start_date, end_date):
         raise
 
 def process_cme_data(cme_data):
+    """Process CME data and extract relevant fields."""
+    processed = []
+    for cme in cme_data:
+        processed.append({
+            'cmeID': cme.get('activityID'),
+            'cmeStartTime': pd.to_datetime(cme.get('startTime'))
+        })
+    return pd.DataFrame(processed)
     """
     Process and clean CME data from NASA DONKI API.
     
@@ -180,6 +197,33 @@ def process_cme_data(cme_data):
         raise
 
 def process_gst_data(gst_data, cme_df):
+    """Process GST data and link with CME events."""
+    processed = []
+    for gst in gst_data:
+        gst_id = gst.get('gstID')
+        gst_time = pd.to_datetime(gst.get('startTime'))
+        kp_index = gst.get('allKpIndex', [{}])[0].get('kpIndex', 0)
+        
+        # Find linked CME events
+        for event in gst.get('linkedEvents', []):
+            if '-CME-' in event.get('activityID', ''):
+                cme_id = event.get('activityID')
+                cme_match = cme_df[cme_df['cmeID'] == cme_id]
+                
+                if not cme_match.empty:
+                    cme_time = cme_match.iloc[0]['cmeStartTime']
+                    time_diff = (gst_time - cme_time).total_seconds() / 3600
+                    
+                    processed.append({
+                        'cmeID': cme_id,
+                        'cmeStartTime': cme_time,
+                        'gstID': gst_id,
+                        'gstStartTime': gst_time,
+                        'timeDifferenceHours': time_diff,
+                        'kpIndex': kp_index
+                    })
+    
+    return pd.DataFrame(processed)
     """
     Process and clean GST data, linking with CME events.
     
@@ -301,6 +345,13 @@ def process_gst_data(gst_data, cme_df):
         raise
 
 def merge_and_clean_data(cme_df, gst_df):
+    """Merge and clean the final dataset."""
+    if gst_df.empty:
+        return pd.DataFrame()
+    
+    # Sort by GST time and reset index
+    final_df = gst_df.sort_values('gstStartTime').reset_index(drop=True)
+    return final_df
     """
     Merge and clean CME and GST data to create final dataset.
     
@@ -339,6 +390,39 @@ def merge_and_clean_data(cme_df, gst_df):
         raise
 
 def main():
+    """Main execution function."""
+    # Set date range
+    start_date = datetime(2013, 5, 1)
+    end_date = datetime(2024, 5, 1)
+    
+    # Get and process data
+    cme_data = get_cme_data(start_date, end_date)
+    gst_data = get_gst_data(start_date, end_date)
+    
+    cme_df = process_cme_data(cme_data)
+    gst_df = process_gst_data(gst_data, cme_df)
+    final_df = merge_and_clean_data(cme_df, gst_df)
+    
+    # Create output directory
+    os.makedirs('output', exist_ok=True)
+    
+    # Save results
+    final_df.to_csv('output/space_weather_data.csv', index=False)
+    
+    # Calculate and save statistics
+    if not final_df.empty:
+        stats = {
+            'Average hours between CME and GST': final_df['timeDifferenceHours'].mean(),
+            'Minimum hours': final_df['timeDifferenceHours'].min(),
+            'Maximum hours': final_df['timeDifferenceHours'].max(),
+            'Standard deviation': final_df['timeDifferenceHours'].std()
+        }
+        
+        with open('output/summary_statistics.txt', 'w') as f:
+            for metric, value in stats.items():
+                f.write(f"{metric}: {value:.2f}\n")
+    
+    return final_df
     """
     Main execution function.
     """
