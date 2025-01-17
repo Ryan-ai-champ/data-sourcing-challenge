@@ -164,12 +164,12 @@ def process_cme_data(cme_data):
         for cme in cme_data:
             cme_info = {
                 'cmeID': cme.get('activityID', ''),
-                'time': cme.get('startTime')
+                'startTime': cme.get('startTime')
             }
             processed_data.append(cme_info)
         
         df = pd.DataFrame(processed_data)
-        df['cmeTime'] = pd.to_datetime(df['time'])
+        df['cmeTime'] = pd.to_datetime(df['startTime'])
         df = df[['cmeID', 'cmeTime']]  # Keep only required fields
         
         logging.info(f"Processed {len(processed_data)} CME records")
@@ -259,7 +259,7 @@ def process_gst_data(gst_data, cme_df):
                         logging.warning(f"No matching CME found for ID: {cme_id}")
                         continue
                             
-                    cme_time = linked_cme['time'].iloc[0]
+                    cme_time = linked_cme['cmeTime'].iloc[0]
                     time_diff = (gst_time - cme_time).total_seconds() / 3600  # hours
                         
                     kp_index_data = gst.get('allKpIndex', [])
@@ -269,9 +269,9 @@ def process_gst_data(gst_data, cme_df):
                     
                     gst_info = {
                         'cmeID': cme_id,
-                        'cmeTime': cme_time,
+                        'cmeTime': pd.to_datetime(cme_time),
                         'gstID': gst.get('gstID', ''),
-                        'gstTime': gst_time,
+                        'gstTime': pd.to_datetime(gst_time),
                         'timeDifferenceHours': time_diff,
                         'kpIndex': kp_index
                     }
