@@ -136,50 +136,50 @@ def process_gst_data(gst_data, cme_df):
         logging.warning("No GST data found for the specified period")
         return pd.DataFrame()
         
+    processed_data = []
+    
     try:
-        processed_data = []
         for gst in gst_data:
-            if not isinstance(gst, dict):
-                logging.warning(f"Skipping invalid GST record: {gst}")
-                continue
-                
-            linked_events = gst.get('linkedEvents')
-            if linked_events is None:
-                logging.debug(f"No linked events for GST: {gst.get('gstID', 'unknown')}")
-                continue
-                
-            cme_links = []
-            for event in linked_events:
-                if isinstance(event, dict) and event.get('activityType') == 'CME':
-                    cme_id = event.get('activityID')
-                    if cme_id:
-                        cme_links.append(cme_id)
-                        logging.debug(f"Found linked CME: {cme_id}")
-            
-            if not cme_links:  # Skip GSTs without linked CMEs
-                continue
-                
-            for cme_id in cme_links:
+            # Process each GST record
+            try:
+                if not isinstance(gst, dict):
+                    raise ValueError(f"Invalid GST record: {gst}")
+                        
+                linked_events = gst.get('linkedEvents')
+                if linked_events is None:
+                    logging.debug(f"No linked events for GST: {gst.get('gstID', 'unknown')}")
+                    continue
+                        
+                start_time = gst.get('startTime')
+                if not start_time:
+                    raise ValueError(f"Missing start time for GST: {gst.get('gstID', 'unknown')}")
+                        
                 try:
+                    gst_time = pd.to_datetime(start_time)
+                except (ValueError, TypeError) as e:
+                    raise ValueError(f"Invalid GST time format: {start_time}")
+                        
+                # Process linked CME events
+                cme_links = []
+                for event in linked_events:
+                    if isinstance(event, dict) and event.get('activityType') == 'CME':
+                        cme_id = event.get('activityID')
+                        if cme_id:
+                            cme_links.append(cme_id)
+                            logging.debug(f"Found linked CME: {cme_id}")
+                
+                if not cme_links:  # Skip GSTs without linked CMEs
+                    continue
+                        
+                for cme_id in cme_links:
                     linked_cme = cme_df[cme_df['cmeID'] == cme_id]
                     if linked_cme.empty:
                         logging.warning(f"No matching CME found for ID: {cme_id}")
                         continue
-                        
-                    start_time = gst.get('startTime')
-                    if not start_time:
-                        logging.warning(f"Missing start time for GST: {gst.get('gstID', 'unknown')}")
-                        continue
-                        
-                    try:
-                        gst_time = pd.to_datetime(start_time)
-                    except (ValueError, TypeError) as e:
-                        logging.error(f"Invalid GST time format: {start_time}")
-                        continue
-                        
+                            
                     cme_time = linked_cme['time'].iloc[0]
                     time_diff = (gst_time - cme_time).total_seconds() / 3600  # hours
-                    
+                        
                     kp_index_data = gst.get('allKpIndex', [])
                     kp_index = 0
                     if kp_index_data and isinstance(kp_index_data[0], dict):
@@ -194,13 +194,18 @@ def process_gst_data(gst_data, cme_df):
                         'timeDifferenceHours': time_diff
                     }
                     processed_data.append(gst_info)
+            except Exception as e:
+                logging.warning(f"Error processing GST record: {str(e)}")
+                continue
         
+        # Create final DataFrame
         df = pd.DataFrame(processed_data)
-        df['time'] = pd.to_datetime(df['time'])
+        if not df.empty:
+            df['time'] = pd.to_datetime(df['time'])
         
         logging.info(f"Processed {len(processed_data)} GST records")
         return df
-        
+            
     except Exception as e:
         logging.error(f"Error processing GST data: {str(e)}")
         raise
