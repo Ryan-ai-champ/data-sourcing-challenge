@@ -193,7 +193,7 @@ def process_gst_data(gst_data, cme_df):
                         'linkedCME': cme_id,
                         'timeDifferenceHours': time_diff
                     }
-                processed_data.append(gst_info)
+                    processed_data.append(gst_info)
         
         df = pd.DataFrame(processed_data)
         df['time'] = pd.to_datetime(df['time'])
