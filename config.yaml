@@ -1,0 +1,53 @@
+# NASA Data Retrieval Configuration
+
+# API Settings
+api:
+  base_url: "https://api.nasa.gov/DONKI"
+  endpoints:
+    cme: "/CME"
+    gst: "/GST"
+  max_retries: 3
+  base_delay: 1  # seconds
+  timeout: 30    # seconds
+
+# Data Retrieval Settings
+data:
+  max_date_range_days: 365
+  min_year: 2010
+  batch_size: 100
+
+# Output Settings
+output:
+  directory: "output"
+  formats:
+    - csv
+    - json
+    - excel
+  visualizations:
+    - speed_kp_correlation
+    - propagation_times
+    - monthly_events
+
+# Logging Configuration
+logging:
+  level: INFO
+  file: "nasa_data.log"
+  format: "%(asctime)s - %(levelname)s - %(message)s"
+  handlers:
+    - type: file
+      level: INFO
+    - type: console
+      level: INFO
+
+# Development Environment
+development:
+  debug: true
+  mock_api: false
+  test_mode: false
+
+# Production Environment
+production:
+  debug: false
+  mock_api: false
+  test_mode: false
+

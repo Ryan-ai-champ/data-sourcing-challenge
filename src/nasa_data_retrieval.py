@@ -1,486 +1,592 @@
+"""NASA Data Retrieval Script
+
+This script fetches and processes space weather data from NASA's DONKI API,
+specifically focusing on Coronal Mass Ejections (CMEs) and 
+Geomagnetic Storms (GSTs).
+
+The script performs the following operations:
+1. Fetches CME data for a specified time period
+2. Fetches GST data for the same period
+3. Processes and cleans the data
+4. Analyzes relationships between CMEs and GSTs
+5. Exports the processed data to CSV format
+
+Required environment variables:
+- NASA_API_KEY: Your NASA API key
+"""
+# Global variables
+NASA_API_KEY = None
+
+# Standard library imports
+import json
+import logging
 import os
+import sys
 import time
-import requests
-import pandas as pd
 from datetime import datetime
+from pathlib import Path
+from typing import Dict, Any
+
+# Third-party imports
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import requests
+import seaborn as sns
+import yaml
 from dotenv import load_dotenv
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('nasa_data.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 
-# Load environment variables
-load_dotenv()
-NASA_API_KEY = os.getenv('NASA_API_KEY')
+class RetryHandler:
+    """Handler for retrying failed API requests with exponential backoff."""
 
-def get_nasa_data(url, params):
+    def __init__(self, max_retries=3, base_delay=1):
+        """Initialize RetryHandler with retry parameters.
+
+        Args:
+            max_retries (int): Maximum number of retry attempts
+            base_delay (int): Base delay between retries in seconds
+        """
+        self.max_retries = max_retries
+        self.base_delay = base_delay
+
+    def execute_with_retry(self, func):
+        """Execute a function with retry logic.
+
+        Args:
+            func (callable): Function to execute
+
+        Returns:
+            The result of the function execution
+
+        Raises:
+            requests.exceptions.RequestException: If all retries fail
+        """
+        for attempt in range(self.max_retries):
+            try:
+                return func()
+            except requests.exceptions.RequestException as e:
+                if attempt == self.max_retries - 1:
+                    raise
+                wait_time = self.base_delay * (2 ** attempt)
+                logging.warning(f"Request failed: {str(e)}. Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+
+# Initialize retry handler for API requests
+retry_handler = RetryHandler(max_retries=3, base_delay=1)
+
+class DataValidationError(Exception):
+    """Custom exception for data validation errors."""
+    pass
+
+class DateRangeError(DataValidationError):
+    """Custom exception for date range validation errors."""
+    pass
+
+class CMEDataError(DataValidationError):
+    """Custom exception for CME data validation errors."""
+    pass
+
+class GSTDataError(DataValidationError):
+    """Custom exception for GST data validation errors."""
+    pass
+
+def load_config(config_path: str) -> Dict[str, Any]:
+    """Load configuration from YAML file."""
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+
+def load_api_key():
+    """Load NASA API key from environment variables and set it globally."""
+    global NASA_API_KEY
+    
+    if not load_dotenv():
+        sys.exit("Error: .env file not found. Please create one with your NASA_API_KEY.")
+    
+    NASA_API_KEY = os.getenv("NASA_API_KEY")
+    if not NASA_API_KEY:
+        sys.exit("Error: NASA_API_KEY not found in .env file.")
+
+
+def validate_date_range(start_date: datetime, end_date: datetime) -> None:
     """
-    Make a request to NASA API with basic error handling.
+    Validate the date range for API queries.
+
+    Args:
+        start_date (datetime): Start date for data retrieval
+        end_date (datetime): End date for data retrieval
+
+    Raises:
+        DateRangeError: If date range is invalid
     """
-    time.sleep(1)  # Basic rate limiting
-    response = requests.get(url, params=params)
-    response.raise_for_status()
-    return response.json()
-    Make a request to NASA API with retry logic and rate limiting.
+    if not isinstance(start_date, datetime) or not isinstance(end_date, datetime):
+        raise DateRangeError("Start and end dates must be datetime objects")
+
+    if start_date > end_date:
+        raise DateRangeError("Start date must be before or equal to end date")
+
+    if (end_date - start_date).days > 365:
+        raise DateRangeError("Date range cannot exceed 1 year")
+
+    if start_date.year < 2010:
+        raise DateRangeError("Data is only available from 2010 onwards")
+
+def validate_cme_data(cme_data: list) -> None:
+    """
+    Validate CME data structure and required fields.
+
+    Args:
+        cme_data (list): Raw CME data from NASA DONKI API
+
+    Raises:
+        CMEDataError: If data validation fails
+    """
+    if not isinstance(cme_data, list):
+        raise CMEDataError("CME data must be a list")
+
+    for cme in cme_data:
+        if not isinstance(cme, dict):
+            raise CMEDataError("Each CME entry must be a dictionary")
+
+        required_fields = ["activityID", "startTime"]
+        missing_fields = [field for field in required_fields if field not in cme]
+        if missing_fields:
+            raise CMEDataError(f"Missing required CME fields: {', '.join(missing_fields)}")
+
+        if "cmeAnalyses" in cme and cme["cmeAnalyses"]:
+            analysis = cme["cmeAnalyses"][0]
+            if not isinstance(analysis, dict):
+                raise CMEDataError("CME analysis must be a dictionary")
+
+def validate_gst_data(gst_data: list) -> None:
+    """
+    Validate GST data structure and required fields.
+
+    Args:
+        gst_data (list): Raw GST data from NASA DONKI API
+
+    Raises:
+        GSTDataError: If data validation fails
+    """
+    if not isinstance(gst_data, list):
+        raise GSTDataError("GST data must be a list")
+
+    for gst in gst_data:
+        if not isinstance(gst, dict):
+            raise GSTDataError("Each GST entry must be a dictionary")
+
+        required_fields = ["gstID", "startTime", "allKpIndex"]
+        missing_fields = [field for field in required_fields if field not in gst]
+        if missing_fields:
+            raise GSTDataError(f"Missing required GST fields: {', '.join(missing_fields)}")
+
+        if not isinstance(gst.get("allKpIndex", []), list):
+            raise GSTDataError("allKpIndex must be a list")
+
+    
+def get_cme_data(start_date: datetime, end_date: datetime) -> Dict[str, Any]:
+    """Fetch Coronal Mass Ejection (CME) data from NASA's DONKI API.
     
     Args:
-        url: The API endpoint URL
-        params: Query parameters for the request
-        retry_count: Current retry attempt number
+        start_date (datetime): Start date for data retrieval
+        end_date (datetime): End date for data retrieval
         
     Returns:
-        JSON response from the API or None if all retries fail
+        dict: JSON response containing CME data
         
     Raises:
-        RequestException: If the request fails after all retries
+        DateRangeError: If date range is invalid
+        CMEDataError: If data validation fails
+        requests.exceptions.RequestException: If API request fails
     """
     try:
-        # Add delay between requests
-        time.sleep(MIN_REQUEST_INTERVAL)
+        validate_date_range(start_date, end_date)
         
-        response = requests.get(url, params=params)
-        
-        if response.status_code == 429:  # Rate limit exceeded
-            if retry_count >= MAX_RETRIES:
-                raise RequestException(f"Rate limit exceeded after {MAX_RETRIES} retries")
-            
-            # Calculate exponential backoff delay
-            delay = RETRY_DELAY_BASE ** retry_count
-            logging.warning(f"Rate limit hit. Waiting {delay} seconds before retry {retry_count + 1}/{MAX_RETRIES}")
-            time.sleep(delay)
-            return make_nasa_request(url, params, retry_count + 1)
-            
-        elif response.status_code == 403:  # Invalid API key
-            raise RequestException("Invalid NASA API key. Please check your .env file")
-            
-        elif response.status_code != 200:
-            if retry_count >= MAX_RETRIES:
-                raise RequestException(f"Request failed with status {response.status_code} after {MAX_RETRIES} retries")
-            
-            delay = RETRY_DELAY_BASE ** retry_count
-            logging.warning(f"Request failed. Waiting {delay} seconds before retry {retry_count + 1}/{MAX_RETRIES}")
-            time.sleep(delay)
-            return make_nasa_request(url, params, retry_count + 1)
-            
-        return response.json()
-        
-    except requests.exceptions.ConnectionError as e:
-        if retry_count >= MAX_RETRIES:
-            raise RequestException(f"Connection error after {MAX_RETRIES} retries: {str(e)}")
-        
-        delay = RETRY_DELAY_BASE ** retry_count
-        logging.warning(f"Connection error. Waiting {delay} seconds before retry {retry_count + 1}/{MAX_RETRIES}")
-        time.sleep(delay)
-        return make_nasa_request(url, params, retry_count + 1)
-
-def get_cme_data(start_date, end_date):
-    """Get CME data for the specified date range."""
-    url = "https://api.nasa.gov/DONKI/CME"
-    params = {
-        'startDate': start_date.strftime('%Y-%m-%d'),
-        'endDate': end_date.strftime('%Y-%m-%d'),
-        'api_key': NASA_API_KEY
-    }
-    return get_nasa_data(url, params)
-    """
-    Retrieve CME (Coronal Mass Ejection) data from NASA API.
-    
-    Args:
-        start_date (datetime): Start date for data retrieval
-        end_date (datetime): End date for data retrieval
-        
-    Returns:
-        list: List of CME events
-    """
-    try:
         url = "https://api.nasa.gov/DONKI/CME"
         params = {
-            'startDate': start_date.strftime('%Y-%m-%d'),
-            'endDate': end_date.strftime('%Y-%m-%d'),
-            'api_key': NASA_API_KEY
+            "startDate": start_date.strftime("%Y-%m-%d"),
+            "endDate": end_date.strftime("%Y-%m-%d"),
+            "api_key": NASA_API_KEY
         }
         
-        logging.info(f"Requesting CME data from {start_date} to {end_date}")
-        response_data = make_nasa_request(url, params)
+        logging.info(f"Fetching CME data from {start_date} to {end_date}")
         
-        if not response_data:
-            raise RequestException("Failed to retrieve CME data after all retries")
+        def make_request():
+            return requests.get(url, params=params)
             
-        logging.info(f"Successfully retrieved {len(response_data)} CME records")
-        return response_data
+        response = retry_handler.execute_with_retry(make_request)
+        data = response.json()
         
+        validate_cme_data(data)
+        logging.info(f"Successfully retrieved and validated {len(data)} CME records")
+        return data
+        
+    except (DateRangeError, CMEDataError) as e:
+        logging.error(f"Validation error: {str(e)}")
+        raise
     except requests.exceptions.RequestException as e:
-        logging.error(f"Error retrieving CME data: {str(e)}")
+        logging.error(f"Error fetching CME data: {str(e)}")
         raise
 
-def get_gst_data(start_date, end_date):
-    """Get GST data for the specified date range."""
-    url = "https://api.nasa.gov/DONKI/GST"
-    params = {
-        'startDate': start_date.strftime('%Y-%m-%d'),
-        'endDate': end_date.strftime('%Y-%m-%d'),
-        'api_key': NASA_API_KEY
-    }
-    return get_nasa_data(url, params)
-    """
-    Retrieve GST (Geomagnetic Storm) data from NASA API.
+
+def get_gst_data(start_date: datetime, end_date: datetime) -> Dict[str, Any]:
+    """Fetch Geomagnetic Storm (GST) data from NASA's DONKI API.
     
     Args:
         start_date (datetime): Start date for data retrieval
         end_date (datetime): End date for data retrieval
         
     Returns:
-        list: List of GST events
+        dict: JSON response containing GST data
+        
+    Raises:
+        DateRangeError: If date range is invalid
+        GSTDataError: If data validation fails
+        requests.exceptions.RequestException: If API request fails
     """
     try:
+        validate_date_range(start_date, end_date)
+        
         url = "https://api.nasa.gov/DONKI/GST"
         params = {
-            'startDate': start_date.strftime('%Y-%m-%d'),
-            'endDate': end_date.strftime('%Y-%m-%d'),
-            'api_key': NASA_API_KEY
+            "startDate": start_date.strftime("%Y-%m-%d"),
+            "endDate": end_date.strftime("%Y-%m-%d"),
+            "api_key": NASA_API_KEY
         }
         
-        logging.info(f"Requesting GST data from {start_date} to {end_date}")
-        response_data = make_nasa_request(url, params)
+        logging.info(f"Fetching GST data from {start_date} to {end_date}")
         
-        if not response_data:
-            raise RequestException("Failed to retrieve GST data after all retries")
+        def make_request():
+            return requests.get(url, params=params)
             
-        logging.info(f"Successfully retrieved {len(response_data)} GST records")
-        if response_data:
-            logging.debug(f"Sample GST record structure: {response_data[0]}")
-        return response_data
+        response = retry_handler.execute_with_retry(make_request)
+        data = response.json()
         
+        validate_gst_data(data)
+        logging.info(f"Successfully retrieved and validated {len(data)} GST records")
+        return data
+        
+    except (DateRangeError, GSTDataError) as e:
+        logging.error(f"Validation error: {str(e)}")
+        raise
     except requests.exceptions.RequestException as e:
-        logging.error(f"Error retrieving GST data: {str(e)}")
+        logging.error(f"Error fetching GST data: {str(e)}")
         raise
 
-def process_cme_data(cme_data):
-    """Process CME data and extract relevant fields."""
-    processed = []
-    for cme in cme_data:
-        processed.append({
-            'cmeID': cme.get('activityID'),
-            'cmeStartTime': pd.to_datetime(cme.get('startTime'))
-        })
-    return pd.DataFrame(processed)
+def safe_float_convert(value, default=float('nan')):
     """
-    Process and clean CME data from NASA DONKI API.
+    Safely convert a value to float, returning default if conversion fails.
     
     Args:
-        cme_data (list): Raw CME data from NASA API containing fields:
-            - activityID: Unique identifier for the CME
-            - startTime: Start time of the CME event
-            - link: URL to event details
-            
+        value: Value to convert
+        default: Default value to return if conversion fails
+        
     Returns:
-        DataFrame: Processed CME data with columns:
-            - cmeID: Unique identifier for the CME
-            - time: Start time of the CME event
+        float: Converted value or default if conversion fails
     """
+    if value is None:
+        return default
     try:
-        # Extract relevant fields
-        processed_data = []
-        for cme in cme_data:
-            cme_info = {
-                'cmeID': cme.get('activityID', ''),
-                'startTime': cme.get('startTime')
-            }
-            processed_data.append(cme_info)
+        return float(value)
+    except (TypeError, ValueError):
+        return default
         
-        df = pd.DataFrame(processed_data)
-        df['cmeTime'] = pd.to_datetime(df['startTime'])
-        df = df[['cmeID', 'cmeTime']]  # Keep only required fields
+def process_cme_data(cme_data):
+    """
+    Process and clean Coronal Mass Ejection (CME) data.
+    
+    Args:
+        cme_data (list): Raw CME data from NASA DONKI API
         
-        logging.info(f"Processed {len(processed_data)} CME records")
-        return df
+    Returns:
+        pd.DataFrame: Processed CME data with following columns:
+            - cmeID: Unique identifier for the CME
+            - cmeStartTime: Start time of the CME
+            - speed: Speed of the CME in km/s
+            - type: Type of CME (e.g., 'S', 'C', 'R')
+            - angle: Principal angle of the CME
+            - latitude: Source latitude
+            - longitude: Source longitude
+    """
+    processed = []
+    for cme in cme_data:
+        # Extract relevant CME analysis data
+        analysis = cme.get("cmeAnalyses", [{}])[0]
+        logging.debug(f"Processing CME record: {cme.get('activityID')}")
+        logging.debug(f"Raw analysis data: {analysis}")
         
-    except Exception as e:
-        logging.error(f"Error processing CME data: {str(e)}")
-        raise
+        entry = {
+            "cmeID": cme.get("activityID"),
+            "cmeStartTime": pd.to_datetime(cme.get("startTime")),
+            "speed": safe_float_convert(analysis.get("speed")),
+            "type": analysis.get("type", "Unknown"),
+            "angle": safe_float_convert(analysis.get("principalAngle")),
+            "latitude": safe_float_convert(analysis.get("latitude")),
+            "longitude": safe_float_convert(analysis.get("longitude"))
+        }
+        
+        logging.debug(f"Processed entry: {entry}")
+        processed.append(entry)
+        
+    # Create DataFrame and log column names for debugging
+    df = pd.DataFrame(processed)
+    logging.debug(f"CME DataFrame columns: {df.columns.tolist()}")
+    logging.debug(f"CME DataFrame first row: {df.iloc[0] if not df.empty else 'Empty DataFrame'}")
+    return df
 
 def process_gst_data(gst_data, cme_df):
-    """Process GST data and link with CME events."""
+    """
+    Process Geomagnetic Storm (GST) data and link it with CME events.
+    
+    Args:
+        gst_data (list): Raw GST data from NASA DONKI API
+        cme_df (pd.DataFrame): Processed CME data
+        
+    Returns:
+        pd.DataFrame: Combined GST and CME data with following columns:
+            - cmeID: Linked CME identifier
+            - cmeStartTime: Start time of the CME
+            - gstID: GST event identifier
+            - gstStartTime: Start time of the GST
+            - timeDifferenceHours: Time difference between CME and GST
+            - kpIndex: Kp-index indicating storm strength
+    """
     processed = []
     for gst in gst_data:
-        gst_id = gst.get('gstID')
-        gst_time = pd.to_datetime(gst.get('startTime'))
-        kp_index = gst.get('allKpIndex', [{}])[0].get('kpIndex', 0)
+        gst_id = gst.get("gstID")
+        gst_time = pd.to_datetime(gst.get("startTime"))
+        kp_index = gst.get("allKpIndex", [{}])[0].get("kpIndex", 0)
         
-        # Find linked CME events
-        for event in gst.get('linkedEvents', []):
-            if '-CME-' in event.get('activityID', ''):
-                cme_id = event.get('activityID')
-                cme_match = cme_df[cme_df['cmeID'] == cme_id]
+        for event in gst.get("linkedEvents", []):
+            if "-CME-" in event.get("activityID", ""):
+                cme_id = event.get("activityID")
+                cme_match = cme_df[cme_df["cmeID"] == cme_id]
                 
                 if not cme_match.empty:
-                    cme_time = cme_match.iloc[0]['cmeStartTime']
+                    cme_row = cme_match.iloc[0]
+                    cme_time = cme_row["cmeStartTime"]
                     time_diff = (gst_time - cme_time).total_seconds() / 3600
                     
                     processed.append({
-                        'cmeID': cme_id,
-                        'cmeStartTime': cme_time,
-                        'gstID': gst_id,
-                        'gstStartTime': gst_time,
-                        'timeDifferenceHours': time_diff,
-                        'kpIndex': kp_index
+                        "cmeID": cme_id,
+                        "cmeStartTime": cme_time,
+                        "gstID": gst_id,
+                        "gstStartTime": gst_time,
+                        "timeDifferenceHours": time_diff,
+                        "kpIndex": kp_index,
+                        "speed": cme_row.get("speed", float('nan')),
+                        "type": cme_row.get("type", "Unknown"),
+                        "angle": cme_row.get("angle", float('nan')),
+                        "latitude": cme_row.get("latitude", float('nan')),
+                        "longitude": cme_row.get("longitude", float('nan'))
                     })
-    
     return pd.DataFrame(processed)
+
+def analyze_cme_gst_correlation(combined_df: pd.DataFrame) -> Dict[str, float]:
     """
-    Process and clean GST data, linking with CME events.
+    Calculate correlation coefficients between CME and GST characteristics.
     
     Args:
-        gst_data (list): Raw GST data from NASA API
-        cme_df (DataFrame): Processed CME data for linking
+        combined_df (pd.DataFrame): Processed and combined CME-GST data
         
     Returns:
-        DataFrame: Processed GST data with CME links
-    
-    Raises:
-        ValueError: If gst_data is None or empty
-        KeyError: If required fields are missing in GST data
+        dict: Dictionary containing correlation coefficients
     """
-    if gst_data is None:
-        raise ValueError("GST data is None")
-        
-    if not isinstance(gst_data, list):
-        raise ValueError("GST data must be a list")
-        
-    if not gst_data:
-        logging.warning("No GST data found for the specified period")
-        return pd.DataFrame()
-        
-    processed_data = []
-    
-    try:
-        logging.info(f"Processing {len(gst_data)} raw GST records")
-        for gst in gst_data:
-            # Log the complete GST record for debugging
-            try:
-                if not isinstance(gst, dict):
-                    raise ValueError(f"Invalid GST record: {gst}")
-                        
-                linked_events = gst.get('linkedEvents', [])
-                if linked_events:
-                    logging.info(f"Found {len(linked_events)} linked events for GST: {gst.get('gstID', 'unknown')}")
-                    # Log details about each linked event
-                    for idx, event in enumerate(linked_events):
-                        logging.info(f"  Linked Event {idx + 1}:")
-                        logging.info(f"    Type: {event.get('activityType', 'unknown')}")
-                        logging.info(f"    ID: {event.get('activityID', 'unknown')}")
-                else:
-                    logging.info(f"No linked events found for GST: {gst.get('gstID', 'unknown')}")
-                if linked_events is None:
-                    continue
-                        
-                start_time = gst.get('startTime')
-                if not start_time:
-                    raise ValueError(f"Missing start time for GST: {gst.get('gstID', 'unknown')}")
-                        
-                try:
-                    gst_time = pd.to_datetime(start_time)
-                except (ValueError, TypeError) as e:
-                    raise ValueError(f"Invalid GST time format: {start_time}")
-                        
-                # Process linked CME events
-                # Process linked CME events
-                cme_links = []
-                for event in linked_events:
-                    if not isinstance(event, dict):
-                        logging.warning(f"Invalid linked event format: {event}")
-                        continue
-                        
-                    event_id = event.get('activityID', '')
+    correlations = {
+        'speed_kp_correlation': combined_df['speed'].corr(combined_df['kpIndex']),
+        'time_diff_kp_correlation': combined_df['timeDifferenceHours'].corr(combined_df['kpIndex']),
+        'speed_time_diff_correlation': combined_df['speed'].corr(combined_df['timeDifferenceHours'])
+    }
+    return correlations
 
-                    # Check if the event is a CME based on ID pattern
-                    if event_id and '-CME-' in event_id:
-                        cme_links.append(event_id)
-
-                if not cme_links:
-                    logging.info(f"Skipping GST {gst.get('gstID', 'unknown')} - no valid linked CMEs found")
-                    continue
-                for cme_id in cme_links:
-                    linked_cme = cme_df[cme_df['cmeID'] == cme_id]
-                    if linked_cme.empty:
-                        logging.warning(f"No matching CME found for ID: {cme_id}")
-                        continue
-                            
-                    cme_time = linked_cme['cmeTime'].iloc[0]
-                    time_diff = (gst_time - cme_time).total_seconds() / 3600  # hours
-                        
-                    kp_index_data = gst.get('allKpIndex', [])
-                    kp_index = 0
-                    if kp_index_data and isinstance(kp_index_data[0], dict):
-                        kp_index = kp_index_data[0].get('kpIndex', 0)
-                    
-                    gst_info = {
-                        'cmeID': cme_id,
-                        'cmeTime': pd.to_datetime(cme_time),
-                        'gstID': gst.get('gstID', ''),
-                        'gstTime': pd.to_datetime(gst_time),
-                        'timeDifferenceHours': time_diff,
-                        'kpIndex': kp_index
-                    }
-                    processed_data.append(gst_info)
-            except Exception as e:
-                logging.warning(f"Error processing GST record: {str(e)}")
-                continue
-        
-        # Create final DataFrame
-        df = pd.DataFrame(processed_data)
-        if not df.empty:
-            # Ensure all datetime fields are properly formatted
-            df['gstTime'] = pd.to_datetime(df['gstTime'])
-            df['cmeTime'] = pd.to_datetime(df['cmeTime'])
-            
-            # Calculate time difference in hours
-            df['timeDifferenceHours'] = (df['gstTime'] - df['cmeTime']).dt.total_seconds() / 3600
-            
-            # Keep only required columns in specific order
-            df = df[['cmeID', 'cmeTime', 'gstID', 'gstTime', 'timeDifferenceHours', 'kpIndex']]
-        
-        logging.info(f"Processed {len(processed_data)} GST records")
-        return df
-            
-    except Exception as e:
-        logging.error(f"Error processing GST data: {str(e)}")
-        raise
-
-def merge_and_clean_data(cme_df, gst_df):
-    """Merge and clean the final dataset."""
-    if gst_df.empty:
-        return pd.DataFrame()
-    
-    # Sort by GST time and reset index
-    final_df = gst_df.sort_values('gstStartTime').reset_index(drop=True)
-    return final_df
+def analyze_propagation_times(combined_df: pd.DataFrame) -> Dict[str, float]:
     """
-    Merge and clean CME and GST data to create final dataset.
+    Analyze the time delays between CMEs and their associated GSTs.
     
     Args:
-        cme_df (DataFrame): Processed CME data with columns:
-            - cmeID: Unique identifier for the CME
-            - time: Start time of the CME event
-        gst_df (DataFrame): Processed GST data with columns: 
-            - cmeID: ID of linked CME event
-            - cmeTime: Start time of CME event
-            - gstID: Unique identifier for the GST
-            - gstTime: Start time of GST event
-            - timeDifferenceHours: Hours between CME and GST
-            - kpIndex: Geomagnetic storm KP index
-            
+        combined_df (pd.DataFrame): Processed and combined CME-GST data
+        
     Returns:
-        DataFrame: Merged and cleaned data containing only linked CME-GST events
+        dict: Dictionary containing propagation time statistics
     """
+    time_stats = {
+        'mean_propagation_time': combined_df['timeDifferenceHours'].mean(),
+        'median_propagation_time': combined_df['timeDifferenceHours'].median(),
+        'std_propagation_time': combined_df['timeDifferenceHours'].std(),
+        'min_propagation_time': combined_df['timeDifferenceHours'].min(),
+        'max_propagation_time': combined_df['timeDifferenceHours'].max()
+    }
+    return time_stats
+
+def generate_summary_statistics(combined_df: pd.DataFrame) -> Dict[str, Dict[str, float]]:
+    """
+    Generate comprehensive summary statistics for the space weather events.
+    
+    Args:
+        combined_df (pd.DataFrame): Processed and combined CME-GST data
+        
+    Returns:
+        dict: Dictionary containing summary statistics
+    """
+    logging.debug("Combined DataFrame columns available for statistics: %s", combined_df.columns.tolist())
+    
+    # Add type conversion to ensure numeric columns
+    numeric_columns = ['speed', 'kpIndex', 'angle', 'latitude', 'longitude']
+    for col in numeric_columns:
+        if col in combined_df.columns:
+            combined_df[col] = pd.to_numeric(combined_df[col], errors='coerce')
+
     try:
-        # We only need the GST dataframe since it already contains linked CME info
-        if gst_df.empty:
-            logging.warning("No GST records with linked CMEs found")
-            return pd.DataFrame()
+        # Define statistics to compute for each numeric column
+        stats_to_compute = ['mean', 'median', 'std', 'min', 'max']
+        cme_stats = {}
         
-        # Sort by GST time
-        cleaned_df = gst_df.sort_values('gstTime')
-        
-        # Reset index
-        cleaned_df = cleaned_df.reset_index(drop=True)
-        
-        logging.info(f"Successfully merged and cleaned data. Final dataset has {len(cleaned_df)} records")
-        return cleaned_df
-        
-    except Exception as e:
-        logging.error(f"Error merging and cleaning data: {str(e)}")
-        raise
+        # Only compute statistics for columns that exist in the dataframe
+        for col in numeric_columns:
+            if col in combined_df.columns:
+                cme_stats[col] = combined_df[col].agg(stats_to_compute).to_dict()
+    except KeyError as e:
+        logging.error("Failed to calculate statistics. Missing column: %s", str(e))
+        logging.debug("Available columns: %s", combined_df.columns.tolist())
+        cme_stats = {}
+    
+    event_counts = {
+        'total_cmes': len(combined_df['cmeID'].unique()),
+        'total_gsts': len(combined_df['gstID'].unique()),
+        'linked_events': len(combined_df)
+    }
+    
+    return {
+        'cme_statistics': cme_stats,
+        'event_counts': event_counts,
+        'correlations': analyze_cme_gst_correlation(combined_df),
+        'propagation_times': analyze_propagation_times(combined_df)
+    }
+def create_speed_kp_scatter(combined_df: pd.DataFrame, output_dir: str) -> None:
+    """Create a scatter plot of CME speeds vs Kp indices."""
+    plt.figure(figsize=(10, 6))
+    sns.scatterplot(data=combined_df, x='speed', y='kpIndex', alpha=0.6)
+    plt.title('CME Speed vs Geomagnetic Storm Strength')
+    plt.xlabel('CME Speed (km/s)')
+    plt.ylabel('Kp Index')
+    plt.savefig(os.path.join(output_dir, 'speed_kp_correlation.png'))
+    plt.close()
+
+def create_propagation_histogram(combined_df: pd.DataFrame, output_dir: str) -> None:
+    """Create a histogram of CME-to-GST propagation times."""
+    plt.figure(figsize=(10, 6))
+    sns.histplot(data=combined_df, x='timeDifferenceHours', bins=30)
+    plt.title('Distribution of CME-to-GST Propagation Times')
+    plt.xlabel('Propagation Time (hours)')
+    plt.ylabel('Count')
+    plt.savefig(os.path.join(output_dir, 'propagation_times.png'))
+    plt.close()
+
+def create_monthly_events(combined_df: pd.DataFrame, output_dir: str) -> None:
+    """Create a line plot of monthly event counts."""
+    monthly_events = combined_df.set_index('cmeStartTime').resample('M').size()
+    plt.figure(figsize=(12, 6))
+    monthly_events.plot(kind='line', marker='o')
+    plt.title('Monthly Space Weather Events')
+    plt.xlabel('Date')
+    plt.ylabel('Number of Events')
+    plt.grid(True)
+    plt.savefig(os.path.join(output_dir, 'monthly_events.png'))
+    plt.close()
+
+def export_results(combined_df: pd.DataFrame, summary_stats: dict, output_dir: str) -> None:
+    """Export analysis results in multiple formats."""
+    # Create the output directory if it doesn't exist
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    
+    # Create a copy of the dataframe to avoid modifying the original
+    export_df = combined_df.copy()
+    
+    # Convert timezone-aware datetime columns to timezone-naive UTC
+    datetime_columns = export_df.select_dtypes(include=['datetime64[ns, UTC]']).columns
+    for col in datetime_columns:
+        export_df[col] = export_df[col].dt.tz_convert('UTC').dt.tz_localize(None)
+    
+    # Export to CSV
+    export_df.to_csv(os.path.join(output_dir, 'combined_analysis.csv'), index=False)
+    
+    # Export summary statistics to JSON
+    with open(os.path.join(output_dir, 'summary_statistics.json'), 'w') as f:
+        json.dump(summary_stats, f, indent=4)
+    
+    # Export to Excel with multiple sheets
+    with pd.ExcelWriter(os.path.join(output_dir, 'space_weather_analysis.xlsx')) as writer:
+        export_df.to_excel(writer, sheet_name='Combined Data', index=False)
+        pd.DataFrame(summary_stats).to_excel(writer, sheet_name='Summary Stats')
 
 def main():
-    """Main execution function."""
-    # Set date range
-    start_date = datetime(2013, 5, 1)
-    end_date = datetime(2024, 5, 1)
-    
-    # Get and process data
-    cme_data = get_cme_data(start_date, end_date)
-    gst_data = get_gst_data(start_date, end_date)
-    
-    cme_df = process_cme_data(cme_data)
-    gst_df = process_gst_data(gst_data, cme_df)
-    final_df = merge_and_clean_data(cme_df, gst_df)
-    
-    # Create output directory
-    os.makedirs('output', exist_ok=True)
-    
-    # Save results
-    final_df.to_csv('output/space_weather_data.csv', index=False)
-    
-    # Calculate and save statistics
-    if not final_df.empty:
-        stats = {
-            'Average hours between CME and GST': final_df['timeDifferenceHours'].mean(),
-            'Minimum hours': final_df['timeDifferenceHours'].min(),
-            'Maximum hours': final_df['timeDifferenceHours'].max(),
-            'Standard deviation': final_df['timeDifferenceHours'].std()
-        }
-        
-        with open('output/summary_statistics.txt', 'w') as f:
-            for metric, value in stats.items():
-                f.write(f"{metric}: {value:.2f}\n")
-    
-    return final_df
-    """
-    Main execution function.
-    """
+    """Main function to orchestrate the data retrieval and processing."""
+    # Load configuration and API key
+    load_api_key()
     try:
-        # Set specific date range per requirements 
-        end_date = datetime(2024, 5, 1)
-        start_date = datetime(2013, 5, 1)
+        # Initialize configuration and logging
+        logging.info("Starting NASA data retrieval process")
         
-        # Get data
+        # Set the date range for data retrieval
+        end_date = datetime.now()
+        start_date = end_date - pd.Timedelta(days=30)  # Last 30 days of data
+        logging.info(f"Retrieving data from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
+        
+        # Fetch data
+        logging.info("Fetching CME (Coronal Mass Ejection) data...")
         cme_data = get_cme_data(start_date, end_date)
+        logging.info("Fetching GST (Geomagnetic Storm) data...")
         gst_data = get_gst_data(start_date, end_date)
         
-        # Process data
+        # Process CME data
         cme_df = process_cme_data(cme_data)
-        gst_df = process_gst_data(gst_data, cme_df)
         
-        # Merge and clean data
-        final_df = merge_and_clean_data(cme_df, gst_df)
+        # Process GST data and find relationships
+        combined_df = process_gst_data(gst_data, cme_df)
         
-        # Calculate summary statistics
-        if not final_df.empty:
-            avg_time_diff = final_df['timeDifferenceHours'].mean()
-            min_time_diff = final_df['timeDifferenceHours'].min()
-            max_time_diff = final_df['timeDifferenceHours'].max()
-            std_time_diff = final_df['timeDifferenceHours'].std()
-            
-            logging.info("\nSummary Statistics:")
-            logging.info(f"Average time between CME and GST: {avg_time_diff:.2f} hours")
-            logging.info(f"Minimum time difference: {min_time_diff:.2f} hours")
-            logging.info(f"Maximum time difference: {max_time_diff:.2f} hours")
-            logging.info(f"Standard deviation: {std_time_diff:.2f} hours")
+        # Save results
+        output_dir = "output"
+        os.makedirs(output_dir, exist_ok=True)
+        # Generate summary statistics
+        logging.info("Generating summary statistics...")
+        summary_stats = generate_summary_statistics(combined_df)
+        logging.info(f"Found {summary_stats['event_counts']['total_cmes']} CME events and {summary_stats['event_counts']['total_gsts']} GST events")
+
+        # Create visualizations
+        create_speed_kp_scatter(combined_df, output_dir)
+        create_propagation_histogram(combined_df, output_dir)
+        create_monthly_events(combined_df, output_dir)
+
+        # Export results in multiple formats
+        export_results(combined_df, summary_stats, output_dir)
+
+        print(f"Analysis complete. Results saved to {output_dir}/")
         
-        # Create output directory if it doesn't exist
-        os.makedirs('output', exist_ok=True)
-        
-        # Save to CSV
-        output_file = 'output/space_weather_data.csv'
-        final_df.to_csv(output_file, index=False)
-        logging.info(f"\nData successfully saved to {output_file}")
-        
-        # Save summary statistics to a separate file
-        if not final_df.empty:
-            stats_file = 'output/summary_statistics.txt'
-            with open(stats_file, 'w') as f:
-                f.write("Summary Statistics for CME-GST Time Differences\n")
-                f.write("===========================================\n\n")
-                f.write(f"Average time between CME and GST: {avg_time_diff:.2f} hours\n")
-                f.write(f"Minimum time difference: {min_time_diff:.2f} hours\n")
-                f.write(f"Maximum time difference: {max_time_diff:.2f} hours\n")
-                f.write(f"Standard deviation: {std_time_diff:.2f} hours\n")
-            logging.info(f"Summary statistics saved to {stats_file}")
-        
-        return final_df
-        
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Failed to fetch data from NASA API: {e}")
+        if hasattr(e.response, 'status_code'):
+            logging.error(f"API Response Status Code: {e.response.status_code}")
+        if hasattr(e.response, 'text'):
+            logging.error(f"API Response Text: {e.response.text}")
+        sys.exit(1)
+    except DateRangeError as e:
+        logging.error(f"Invalid date range: {e}")
+        sys.exit(1)
+    except (CMEDataError, GSTDataError) as e:
+        logging.error(f"Data validation error: {e}")
+        sys.exit(1)
     except Exception as e:
-        logging.error(f"Error in main execution: {str(e)}")
-        raise
+        logging.error(f"An unexpected error occurred: {str(e)}", exc_info=True)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
-
